@@ -79,6 +79,7 @@ const en = {
   destination: 'Destination',
   searchAirportCity: 'Search airport city…',
   scheduledDeparture: 'Scheduled departure',
+  manualFlightNotice: 'Enter airports and flight times manually for this test build.',
   actualDeparture: 'Actual departure',
   holdFlightAtOrigin: 'Keep on ground until actual departure is entered',
   aircraftAtOrigin: 'On the ground at the origin',

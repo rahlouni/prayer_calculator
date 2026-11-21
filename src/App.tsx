@@ -954,7 +954,7 @@ function App() {
               <p className="flight-data-note">{en.flightDataNote} <a href="https://aviationstack.com/signup/free" target="_blank" rel="noreferrer">{en.getFreeApiKey}</a></p>
               <form className="flight-form" onSubmit={applyFlightPlan}>
                 <div className="flight-top-fields">
-                  <label className="flight-number-field">{en.flightNumber}<input value={flightDraft.flightNumber} onChange={(event) => { setFlightDraft((current) => ({ ...current, flightNumber: event.target.value })); setFlightLookupError(''); setFlightLookupMessage('') }} placeholder={en.flightNumberPlaceholder} /><small className="flight-lookup-notice">{en.flightLookupNotice}</small><button className="flight-lookup-button" type="button" onClick={lookupFlight} disabled={flightLookupBusy}>{flightLookupBusy ? <span className="search-spinner" /> : <Search size={14} />}{flightLookupBusy ? en.lookingUpFlight : en.lookupFlight}</button></label>
+                  <label className="flight-number-field">{en.flightNumber}<input value={flightDraft.flightNumber} onChange={(event) => { setFlightDraft((current) => ({ ...current, flightNumber: event.target.value })); setFlightLookupError(''); setFlightLookupMessage('') }} placeholder={en.flightNumberPlaceholder} /><small className="flight-lookup-notice">{import.meta.env.DEV ? en.flightLookupNotice : en.manualFlightNotice}</small>{import.meta.env.DEV && <button className="flight-lookup-button" type="button" onClick={lookupFlight} disabled={flightLookupBusy}>{flightLookupBusy ? <span className="search-spinner" /> : <Search size={14} />}{flightLookupBusy ? en.lookingUpFlight : en.lookupFlight}</button>}</label>
                 </div>
                 <div className="flight-airports">
                   <AirportPicker key={`origin-${flightDraft.origin?.name ?? 'empty'}`} label={en.origin} location={flightDraft.origin} onSelect={(value) => setFlightDraft((current) => ({ ...current, origin: value }))} />
@@ -976,7 +976,7 @@ function App() {
                       <input type="checkbox" checked={Boolean(flightDraft.holdAtOrigin)} onChange={(event) => setFlightDraft((current) => ({ ...current, holdAtOrigin: event.target.checked }))} />
                       <span>{en.holdFlightAtOrigin}</span>
                     </label>}
-                    <button className="flight-status-link" type="button" onClick={lookupFlight} disabled={flightLookupBusy}><Search size={13} />{en.actualDepartureLookup}</button>
+                    {import.meta.env.DEV && <button className="flight-status-link" type="button" onClick={lookupFlight} disabled={flightLookupBusy}><Search size={13} />{en.actualDepartureLookup}</button>}
                   </fieldset>
                   <FlightDateTimePicker label={`${en.expectedArrival} · ${en.destinationTime}`} timezone={flightTimeZone('expectedArrival', flightDraft)} value={displayedFlightTime('expectedArrival')} onChange={(value) => updateFlightTime('expectedArrival', value)} />
                 </div>
