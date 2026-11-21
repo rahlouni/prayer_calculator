@@ -360,7 +360,12 @@ h3 { margin: 0; color: #33483c; font-family: var(--font-display); font-size: 14p
 .flight-map-title > span { display: flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 700; }
 .flight-map-title svg { color: #5a8268; }
 .flight-map-title small { color: #96a097; font-size: 8px; text-align: right; }
-.flight-route-map { height: 275px; width: 100%; background: #e8eee8; }
+.flight-route-map { height: 275px; width: 100%; background: #1b3449; }
+.flight-route-map .flight-dark-basemap { filter: invert(.9) hue-rotate(180deg) saturate(.65) brightness(.85); }
+.flight-route-map .leaflet-bar a,.flight-route-map .leaflet-control-attribution { background: #142433; color: #e8eff5; }
+.flight-route-map .leaflet-control-attribution a { color: #a4d8ff; }
+.flight-route-map .leaflet-bar a:hover,.flight-route-map .leaflet-bar a:focus-visible { background: #263d51; }
+.flight-route-map .leaflet-bar a.leaflet-disabled { color: #8c9aa5; }
 .flight-route-map .leaflet-control-attribution { font-size: 8px; }
 .aircraft-marker-wrap { display: grid!important; place-items: center; border: 0!important; background: transparent!important; }
 .aircraft-marker { display: grid; place-items: center; width: 31px; height: 31px; border: 2px solid #fff; border-radius: 50%; color: #fff; background: #245c46; box-shadow: 0 2px 8px #183b2c55; }

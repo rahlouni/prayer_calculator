@@ -286,13 +286,13 @@ function airportCityLabel(location: Location): string {
 }
 
 function FlightRouteMap({ origin, destination, position, heading, flightNumber, now, timeFormat, status, online, prayerPoint, prayerLabel, airportAtPosition, weather, weatherStatus, onCaptureWeather, departureTime, arrivalTime }: { origin: Location; destination: Location; position: Location; heading: number; flightNumber: string; now: Date; timeFormat: Preferences['timeFormat']; status: string; online: boolean; prayerPoint?: Location; prayerLabel: string; airportAtPosition?: Location; weather: RouteWeather | null; weatherStatus?: 'loading' | 'error'; onCaptureWeather?: () => void; departureTime: number; arrivalTime: number }) {
-  const [showAdvisories, setShowAdvisories] = useState(true)
+  const [showAdvisories, setShowAdvisories] = useState(false)
   const { snapshot: advisorySnapshot, configured: advisoriesConfigured, failed: advisoriesFailed } = useAviationAdvisories(online && showAdvisories)
   const aviationMinute = Math.floor(now.getTime() / 60_000)
   const advisoryData = useMemo(() => activeAdvisories(advisorySnapshot, aviationMinute * 60_000), [advisorySnapshot, aviationMinute])
   const advisoryKey = advisoryData.features.map((feature) => feature.id ?? [feature.properties.firName, feature.properties.hazard, feature.properties.validTimeFrom, feature.properties.validTimeTo].join(':')).join('|')
   const advisoryIsSaved = !online || advisoriesFailed || (advisorySnapshot && now.getTime() - advisorySnapshot.fetchedAt > 900_000)
-  const [showWeatherLayer, setShowWeatherLayer] = useState(true)
+  const [showWeatherLayer, setShowWeatherLayer] = useState(false)
   const weatherBands = useMemo(() => weather ? precipitationBands(weather, origin, destination, departureTime, arrivalTime) : [], [weather, origin, destination, departureTime, arrivalTime])
   const departureWeather = weather?.points.find((sample) => sample.departure)
   const aircraftIcon = useMemo(() => divIcon({
@@ -305,12 +305,12 @@ function FlightRouteMap({ origin, destination, position, heading, flightNumber, 
   return <div className="flight-map-wrap">
     <div className="flight-map-title"><span><MapPinned size={16} /> {en.routeMap}</span><small>{en.estimatedRouteOnly}</small></div>
     <MapContainer key={`${flightNumber}-${origin.latitude}-${destination.latitude}`} center={[position.latitude, position.longitude]} zoom={4} scrollWheelZoom className="flight-route-map">
-      {online && <TileLayer attribution={en.mapAttribution} url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />}
+      {online && <TileLayer className="flight-dark-basemap" attribution={en.mapAttribution} url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />}
       <DayNightLayer minute={Math.floor(now.getTime() / 60_000)} />
       <RouteMapBounds origin={origin} destination={destination} />
       {showAdvisories && advisoryData.features.length > 0 && <AviationAdvisoryLayer key={String(advisorySnapshot?.fetchedAt) + advisoryKey} data={advisoryData} />}
       {showWeatherLayer && weatherBands.map((band) => <Polyline key={band.time} positions={band.positions} pathOptions={{ color: band.color, weight: 24, opacity: 0.72, lineCap: 'butt', className: 'weather-route-band' }} interactive={false} />)}
-      <Polyline positions={path} pathOptions={{ color: '#548267', weight: 3, opacity: 0.8, dashArray: '7 7' }} />
+      <Polyline positions={path} pathOptions={{ color: '#7de4aa', weight: 3, opacity: 0.95, dashArray: '7 7' }} />
       <CircleMarker center={[origin.latitude, origin.longitude]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: '#527b67', fillOpacity: 1 }}><Tooltip className="map-airport-tooltip">{airportCityLabel(origin)}</Tooltip></CircleMarker>
       <CircleMarker center={[destination.latitude, destination.longitude]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: '#b28a53', fillOpacity: 1 }}><Tooltip className="map-airport-tooltip">{airportCityLabel(destination)}</Tooltip></CircleMarker>
       {showWeatherLayer && weather?.points.map((sample) => <CircleMarker key={sample.time} center={[sample.latitude, sample.longitude]} radius={5} pathOptions={{ color: '#fff', weight: 1.5, fillColor: '#236794', fillOpacity: 1 }}>
