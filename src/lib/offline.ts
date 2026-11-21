@@ -8,10 +8,11 @@ export function hasOfflineFlight(): boolean {
   }
 }
 
-export async function cacheFlightApp(): Promise<void> {
+export async function cacheFlightApp(onProgress: (percent: number) => void): Promise<void> {
   const base = new URL(import.meta.env.BASE_URL, window.location.href)
   const worker = navigator.serviceWorker
   await worker.register(new URL('offline-worker.js', base))
+  onProgress(35)
   await new Promise<void>((resolve, reject) => {
     const timer = window.setTimeout(() => reject(new Error('Offline cache did not finish installing')), 20000)
     void worker.ready.then(() => {
@@ -19,6 +20,7 @@ export async function cacheFlightApp(): Promise<void> {
       resolve()
     })
   })
+  onProgress(75)
   if (!await caches.match(new URL('index.html', base).href)) {
     throw new Error('Offline app is missing from browser storage')
   }

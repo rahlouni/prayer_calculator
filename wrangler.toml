@@ -1,0 +1,3 @@
+name = "salah-aviation-weather"
+main = "server/aviation-worker.ts"
+compatibility_date = "2026-11-20"

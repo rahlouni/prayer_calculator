@@ -5,6 +5,7 @@ import {
   PolarCircleResolution,
   PrayerTimes,
   Qibla,
+  Rounding,
 } from 'adhan'
 
 export type MethodKey = 'isna' | 'mwl' | 'egyptian' | 'ummAlQura' | 'karachi' | 'moonsighting'
@@ -51,11 +52,12 @@ const methods = {
   moonsighting: CalculationMethod.MoonsightingCommittee,
 }
 
-export function calculatePrayerTimes(location: Location, day: Date, preferences: Preferences) {
+function prayerTimesForDay(location: Location, day: Date, preferences: Preferences, roundToMinute = true) {
   const params = methods[preferences.method]()
   params.madhab = preferences.madhab === 'hanafi' ? Madhab.Hanafi : Madhab.Shafi
   params.highLatitudeRule = preferences.highLatitude
   params.polarCircleResolution = PolarCircleResolution.Unresolved
+  if (!roundToMinute) params.rounding = Rounding.None
 
   // Keep method defaults unless the user explicitly customized an angle.
   if (preferences.fajrAngle !== null) params.fajrAngle = preferences.fajrAngle
@@ -65,7 +67,19 @@ export function calculatePrayerTimes(location: Location, day: Date, preferences:
   }
 
   const date = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 12)
-  const result = new PrayerTimes(new Coordinates(location.latitude, location.longitude), date, params)
+  return new PrayerTimes(new Coordinates(location.latitude, location.longitude), date, params)
+}
+
+export const salahKeys = ['fajr', 'dhuhr', 'asr', 'maghrib', 'isha'] as const
+export type SalahKey = typeof salahKeys[number]
+
+export function calculateRoutePrayerStarts(location: Location, day: Date, preferences: Preferences) {
+  const times = prayerTimesForDay(location, day, preferences, false)
+  return salahKeys.map((prayer) => times[prayer].getTime())
+}
+
+export function calculatePrayerTimes(location: Location, day: Date, preferences: Preferences) {
+  const result = prayerTimesForDay(location, day, preferences)
   const events = [result.fajr, result.sunrise, result.dhuhr, result.asr, result.maghrib, result.isha]
   if (events.some((event) => !(event instanceof Date) || !Number.isFinite(event.getTime()))) return null
   return {

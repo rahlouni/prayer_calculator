@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { aviationWeatherResponse } from './server/aviation-weather.ts'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig, loadEnv, type Connect, type Plugin } from 'vite'
@@ -69,6 +70,24 @@ function flightStatusProxy(apiKey: string, enablePreview: boolean): Plugin {
   }
 }
 
+function aviationWeatherProxy(): Plugin {
+  const middleware: Connect.NextHandleFunction = async (request, response, next) => {
+    if (new URL(request.url ?? '/', 'http://localhost').pathname !== '/api/aviation-advisories') return next()
+    const result = await aviationWeatherResponse(request.method ?? 'GET')
+    response.writeHead(result.status, Object.fromEntries(result.headers))
+    response.end(await result.text())
+  }
+  return {
+    name: 'aviation-weather-proxy',
+    configureServer(server) {
+      server.middlewares.use(middleware)
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware)
+    },
+  }
+}
+
 function offlineFlightWorker(): Plugin {
   return {
     name: 'offline-flight-worker',
@@ -90,6 +109,6 @@ function offlineFlightWorker(): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   return {
-    plugins: [react(), tailwindcss(), flightStatusProxy(env.AVIATIONSTACK_ACCESS_KEY ?? '', mode === 'flight-test'), offlineFlightWorker()],
+    plugins: [react(), tailwindcss(), flightStatusProxy(env.AVIATIONSTACK_ACCESS_KEY ?? '', mode === 'flight-test'), aviationWeatherProxy(), offlineFlightWorker()],
   }
 })

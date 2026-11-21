@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   CalendarDays,
+  Mountain,
+  Wifi,
+  WifiOff,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -24,7 +27,7 @@ import {
   Plus,
   Minus,
 } from 'lucide-react'
-import { CircleMarker, MapContainer, Marker, Polyline, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet'
+import { CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet'
 import { divIcon } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import en from './i18n/en'
@@ -41,6 +44,13 @@ import {
   type Preferences,
 } from './lib/prayer'
 import { approximateFlightTimezone, cacheFlightApp, displayFlightTimezone, hasOfflineFlight, offlineFlightKey } from './lib/offline'
+import { positionAlongRoute, projectRoutePrayers } from './lib/flight'
+import { AviationAdvisoryLayer } from './AviationAdvisories'
+import { activeAdvisories, useAviationAdvisories } from './lib/aviation'
+import { DayNightLayer } from './DayNightLayer'
+import { captureRouteWeather, forecastHour, precipitationBands, precipitationColors, readRouteWeather, weatherRouteId, type RouteWeather } from './lib/weather'
+import airportCities from './lib/airport-cities.json'
+import { nearbyCity } from './lib/nearby-city'
 import './App.css'
 
 type CityResult = Location & { id: number; admin1?: string }
@@ -68,6 +78,8 @@ type FlightApiRecord = {
   live?: { latitude?: number | null; longitude?: number | null; direction?: number | null; speed_horizontal?: number | null; updated?: string | null }
 }
 
+const headingDirections = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const
+
 const prayerRows: { key: PrayerKey; label: string; icon: typeof Sun; obligatory: boolean }[] = [
   { key: 'fajr', label: en.fajr, icon: Moon, obligatory: true },
   { key: 'sunrise', label: en.sunrise, icon: Sunrise, obligatory: false },
@@ -93,6 +105,13 @@ function readStored<T>(key: string, fallback: T): T {
   } catch {
     return fallback
   }
+}
+
+function formatCountdown(target: Date, now: Date): string {
+  const seconds = Math.max(0, Math.ceil((target.getTime() - now.getTime()) / 1000))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  return [hours, minutes, seconds % 60].map((part) => String(part).padStart(2, '0')).join(':')
 }
 
 function formatTime(date: Date, location: Location, format: Preferences['timeFormat']): string {
@@ -191,26 +210,6 @@ async function findAirportLocation(iata: string | undefined, airportName: string
   return null
 }
 
-function positionAlongRoute(origin: Location, destination: Location, progress: number): Pick<Location, 'latitude' | 'longitude'> {
-  const fraction = Math.max(0, Math.min(1, progress))
-  const radians = Math.PI / 180
-  const startLat = origin.latitude * radians
-  const startLon = origin.longitude * radians
-  const endLat = destination.latitude * radians
-  const endLon = destination.longitude * radians
-  const start = [Math.cos(startLat) * Math.cos(startLon), Math.cos(startLat) * Math.sin(startLon), Math.sin(startLat)]
-  const end = [Math.cos(endLat) * Math.cos(endLon), Math.cos(endLat) * Math.sin(endLon), Math.sin(endLat)]
-  const dot = Math.max(-1, Math.min(1, start[0] * end[0] + start[1] * end[1] + start[2] * end[2]))
-  const angle = Math.acos(dot)
-  const denominator = Math.sin(angle)
-  const startWeight = angle < 0.000001 ? 1 - fraction : Math.sin((1 - fraction) * angle) / denominator
-  const endWeight = angle < 0.000001 ? fraction : Math.sin(fraction * angle) / denominator
-  const x = startWeight * start[0] + endWeight * end[0]
-  const y = startWeight * start[1] + endWeight * end[1]
-  const z = startWeight * start[2] + endWeight * end[2]
-  return { latitude: Math.atan2(z, Math.hypot(x, y)) / radians, longitude: Math.atan2(y, x) / radians }
-}
-
 function routeBearing(origin: Pick<Location, 'latitude' | 'longitude'>, destination: Pick<Location, 'latitude' | 'longitude'>): number {
   const radians = Math.PI / 180
   const lat1 = origin.latitude * radians
@@ -260,7 +259,7 @@ function shiftWallTime(value: string, minutes: number): string {
 function FlightDateTimePicker({ label, timezone, value, onChange, nudgable = false }: { label: string; timezone: string; value: string; onChange: (value: string) => void; nudgable?: boolean }) {
   const [date = '', time = ''] = value.split('T')
   return <div className="flight-datetime-field">
-    <div className="flight-field-heading"><span>{label}</span><small>{timezone}</small></div>
+    <div className="flight-field-heading">{!nudgable && <span>{label}</span>}<small>{timezone}</small></div>
     <input className="flight-date-input" type="date" aria-label={`${label} date`} value={date} onChange={(event) => onChange(changeWallTime(value, 'date', event.target.value))} />
     {nudgable ? <div className="time-stepper">
       <input type="time" step="300" aria-label={`${label} time`} value={time} onChange={(event) => onChange(changeWallTime(value, 'time', event.target.value))} />
@@ -278,32 +277,95 @@ function RouteMapBounds({ origin, destination }: { origin: Location; destination
   return null
 }
 
-function FlightRouteMap({ origin, destination, position, heading, flightNumber, now, timeFormat, status, online }: { origin: Location; destination: Location; position: Location; heading: number; flightNumber: string; now: Date; timeFormat: Preferences['timeFormat']; status: string; online: boolean }) {
+function airportCityLabel(location: Location): string {
+  const airportCode = /\s+\(([A-Z]{3})\)$/.exec(location.name)
+  if (!airportCode) return location.name
+  // OurAirports municipality is the city served by the airport.
+  const cities: Readonly<Record<string, string | undefined>> = airportCities
+  return cities[airportCode[1]] ?? location.name.slice(0, airportCode.index)
+}
+
+function FlightRouteMap({ origin, destination, position, heading, flightNumber, now, timeFormat, status, online, prayerPoint, prayerLabel, airportAtPosition, weather, weatherStatus, onCaptureWeather, departureTime, arrivalTime }: { origin: Location; destination: Location; position: Location; heading: number; flightNumber: string; now: Date; timeFormat: Preferences['timeFormat']; status: string; online: boolean; prayerPoint?: Location; prayerLabel: string; airportAtPosition?: Location; weather: RouteWeather | null; weatherStatus?: 'loading' | 'error'; onCaptureWeather?: () => void; departureTime: number; arrivalTime: number }) {
+  const [showAdvisories, setShowAdvisories] = useState(true)
+  const { snapshot: advisorySnapshot, configured: advisoriesConfigured, failed: advisoriesFailed } = useAviationAdvisories(online && showAdvisories)
+  const aviationMinute = Math.floor(now.getTime() / 60_000)
+  const advisoryData = useMemo(() => activeAdvisories(advisorySnapshot, aviationMinute * 60_000), [advisorySnapshot, aviationMinute])
+  const advisoryKey = advisoryData.features.map((feature) => feature.id ?? [feature.properties.firName, feature.properties.hazard, feature.properties.validTimeFrom, feature.properties.validTimeTo].join(':')).join('|')
+  const advisoryIsSaved = !online || advisoriesFailed || (advisorySnapshot && now.getTime() - advisorySnapshot.fetchedAt > 900_000)
+  const [showWeatherLayer, setShowWeatherLayer] = useState(true)
+  const weatherBands = useMemo(() => weather ? precipitationBands(weather, origin, destination, departureTime, arrivalTime) : [], [weather, origin, destination, departureTime, arrivalTime])
+  const departureWeather = weather?.points.find((sample) => sample.departure)
   const aircraftIcon = useMemo(() => divIcon({
     className: 'aircraft-marker-wrap',
-    html: `<span class="aircraft-marker" style="transform:rotate(${heading}deg)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.5 15 10l6 4v2l-6-2v6l2 2v1l-5-1.5L7 23v-1l2-2v-6l-6 2v-2l6-4 3-8.5Z"/></svg></span>`,
-    iconSize: [36, 36],
-    iconAnchor: [18, 18],
+    html: `<span class="aircraft-marker" style="transform:rotate(${heading}deg)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c-1 0-1.7 1.4-1.7 3.1v4.2l-7 4.4v2.2l7-2v4.1l-2.4 1.9v1.7l4.1-1.2 4.1 1.2v-1.7l-2.4-1.9v-4.1l7 2v-2.2l-7-4.4V5.1C13.7 3.4 13 2 12 2Z"/></svg></span>`,
+    iconSize: [44, 44],
+    iconAnchor: [22, 22],
   }), [heading])
   const path = useMemo(() => routePoints(origin, destination), [origin, destination])
   return <div className="flight-map-wrap">
     <div className="flight-map-title"><span><MapPinned size={16} /> {en.routeMap}</span><small>{en.estimatedRouteOnly}</small></div>
     <MapContainer key={`${flightNumber}-${origin.latitude}-${destination.latitude}`} center={[position.latitude, position.longitude]} zoom={4} scrollWheelZoom className="flight-route-map">
       {online && <TileLayer attribution={en.mapAttribution} url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />}
+      <DayNightLayer minute={Math.floor(now.getTime() / 60_000)} />
       <RouteMapBounds origin={origin} destination={destination} />
+      {showAdvisories && advisoryData.features.length > 0 && <AviationAdvisoryLayer key={String(advisorySnapshot?.fetchedAt) + advisoryKey} data={advisoryData} />}
+      {showWeatherLayer && weatherBands.map((band) => <Polyline key={band.time} positions={band.positions} pathOptions={{ color: band.color, weight: 24, opacity: 0.72, lineCap: 'butt', className: 'weather-route-band' }} interactive={false} />)}
       <Polyline positions={path} pathOptions={{ color: '#548267', weight: 3, opacity: 0.8, dashArray: '7 7' }} />
-      <CircleMarker center={[origin.latitude, origin.longitude]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: '#527b67', fillOpacity: 1 }} />
-      <CircleMarker center={[destination.latitude, destination.longitude]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: '#b28a53', fillOpacity: 1 }} />
+      <CircleMarker center={[origin.latitude, origin.longitude]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: '#527b67', fillOpacity: 1 }}><Tooltip className="map-airport-tooltip">{airportCityLabel(origin)}</Tooltip></CircleMarker>
+      <CircleMarker center={[destination.latitude, destination.longitude]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: '#b28a53', fillOpacity: 1 }}><Tooltip className="map-airport-tooltip">{airportCityLabel(destination)}</Tooltip></CircleMarker>
+      {showWeatherLayer && weather?.points.map((sample) => <CircleMarker key={sample.time} center={[sample.latitude, sample.longitude]} radius={5} pathOptions={{ color: '#fff', weight: 1.5, fillColor: '#236794', fillOpacity: 1 }}>
+        <Popup>
+          <strong>{en.routeWeather}</strong><br />
+          {en.weatherForecastHour.replace('{time}', new Date(forecastHour(sample.time)).toISOString().slice(0, 16).replace('T', ' ') + ' UTC')}<br />
+          {sample.temperature !== null && <>{en.weatherSurfaceTemperature} {Math.round(sample.temperature)} °C<br /></>}
+          {sample.precipitation !== null && <>{en.weatherPrecipitation} {sample.precipitation} mm<br /></>}
+          {sample.wind !== null && <>{en.weatherWind} {Math.round(sample.wind)} km/h</>}
+        </Popup>
+      </CircleMarker>)}
+      {prayerPoint && <CircleMarker center={[prayerPoint.latitude, prayerPoint.longitude]} radius={7} pathOptions={{ color: '#fff', weight: 2, fillColor: '#87611d', fillOpacity: 1 }}><Tooltip>{en.estimated} {prayerLabel}</Tooltip></CircleMarker>}
       <Marker position={[position.latitude, position.longitude]} icon={aircraftIcon} title={flightNumber}>
-        <Tooltip direction="top" offset={[0, -18]}>
+        <Tooltip direction="top" offset={[0, -22]}>
           <strong>{flightNumber}</strong><br />
           {status}<br />
+          {airportAtPosition && <>{airportCityLabel(airportAtPosition)}<br /></>}
           {en.estimatedAircraftTime} {formatTime(now, position, timeFormat)}<br />
           {formatDate(now, position, { month: 'short', day: 'numeric', year: 'numeric' })} · {displayFlightTimezone(position.timezone)}
         </Tooltip>
       </Marker>
     </MapContainer>
-    <div className="flight-map-legend"><span><i className="origin-legend" />{origin.name}</span><span><i className="plane-legend">✈</i>{flightNumber}</span><span><i className="destination-legend" />{destination.name}</span></div>
+    <div className="flight-aviation">
+      {(advisoriesConfigured || advisorySnapshot) && <button className="secondary-button weather-layer-button" type="button" aria-pressed={showAdvisories} onClick={() => setShowAdvisories((shown) => !shown)}>{en.aviationAdvisory}</button>}
+      {showAdvisories && <div className="flight-weather-status" role="status">
+        {advisorySnapshot ? <>
+          <span>{advisoryIsSaved ? en.savedAviationAdvisories : en.aviationAdvisoryCount.replace('{count}', String(advisoryData.features.length))}</span>
+          <time dateTime={new Date(advisorySnapshot.fetchedAt).toISOString()}>{en.weatherCaptured.replace('{time}', new Date(advisorySnapshot.fetchedAt).toLocaleString())}</time>
+          <span>{en.advisoriesCoverage}</span>
+        </> : <span>{!advisoriesConfigured || !online || advisoriesFailed ? en.aviationFeedUnavailable : en.loadingAviationAdvisories}</span>}
+        <a href="https://aviationweather.gov/gfa/?tab=sigmet" target="_blank" rel="noreferrer">{en.aviationWeatherCenter}</a>
+      </div>}
+    </div>
+    {(onCaptureWeather || weather || weatherStatus) && <div className="flight-weather">
+      {onCaptureWeather && <button className="secondary-button" type="button" onClick={onCaptureWeather}>{weather ? en.refreshWeather : en.captureWeather}</button>}
+      {weather && <button className="secondary-button weather-layer-button" type="button" aria-pressed={showWeatherLayer} onClick={() => setShowWeatherLayer((visible) => !visible)}>{en.weatherLayer}</button>}
+      {showWeatherLayer && weatherBands.length > 0 && <div className="weather-layer-legend">
+        <strong>{en.routePrecipitation}</strong>
+        <span><i style={{ backgroundColor: precipitationColors.dry }} />{en.weatherDry}</span>
+        <span><i style={{ backgroundColor: precipitationColors.light }} />{en.weatherLight}</span>
+        <span><i style={{ backgroundColor: precipitationColors.heavy }} />{en.weatherHeavy}</span>
+      </div>}
+      <div className="flight-weather-status" role="status">
+        {weatherStatus === 'loading' && <span>{en.weatherLoading}</span>}
+        {weatherStatus === 'error' && <span>{en.weatherUnavailable}</span>}
+        {weather && <>
+          {departureWeather?.temperature != null && <span>{en.departureWeather} {Math.round(departureWeather.temperature)} °C</span>}
+          <span>{en.weatherSaved.replace('{count}', String(weather.points.length))}</span>
+          <time dateTime={new Date(weather.capturedAt).toISOString()}>{en.weatherCaptured.replace('{time}', new Date(weather.capturedAt).toLocaleString())}</time>
+          <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">{en.weatherAttribution}</a>
+          <span className="weather-layer-limit">{en.surfaceWeatherLimit} <a href="https://aviationweather.gov/gfa/?tab=sigmet" target="_blank" rel="noreferrer">{en.aviationAdvisories}</a></span>
+        </>}
+      </div>
+    </div>}
+    <div className="flight-map-legend"><span><i className="origin-legend" />{airportCityLabel(origin)}</span><span><i className="plane-legend">✈</i>{flightNumber}</span><span><i className="destination-legend" />{airportCityLabel(destination)}</span><span><i className="night-legend" />{en.nightShadow}</span></div>
   </div>
 }
 
@@ -327,16 +389,16 @@ function MapClickPicker({ onPick }: { onPick: (latitude: number, longitude: numb
 }
 
 function AirportPicker({ label, location, onSelect }: { label: string; location: Location | null; onSelect: (location: Location | null) => void }) {
-  const [query, setQuery] = useState(location ? locationDisplay(location) : '')
+  const [query, setQuery] = useState(location ? airportCityLabel(location) : '')
   const [results, setResults] = useState<CityResult[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(false)
   const searchText = query.trim()
-  const visibleResults = searchText.length >= 2 && !(location && searchText === locationDisplay(location)) ? results : []
+  const visibleResults = searchText.length >= 2 && !(location && searchText === airportCityLabel(location)) ? results : []
 
   useEffect(() => {
     const search = searchText
-    if (search.length < 2 || (location && search === locationDisplay(location))) return
+    if (search.length < 2 || (location && search === airportCityLabel(location))) return
     const controller = new AbortController()
     const timer = window.setTimeout(async () => {
       setBusy(true)
@@ -362,7 +424,7 @@ function AirportPicker({ label, location, onSelect }: { label: string; location:
   return <div className="airport-picker">
     <label>{label}</label>
     <div className="airport-input-wrap"><MapPin size={14} /><input value={query} onChange={(event) => { setQuery(event.target.value); onSelect(null) }} placeholder={en.searchAirportCity} autoComplete="off" />{busy && <span className="search-spinner" />}</div>
-    {visibleResults.length > 0 && <div className="airport-results">{visibleResults.map((result) => <button key={result.id} type="button" onClick={() => { onSelect(result); setQuery(locationDisplay(result)); setResults([]) }}><strong>{result.name}</strong><small>{[result.admin1, result.country].filter(Boolean).join(', ')}</small></button>)}</div>}
+    {visibleResults.length > 0 && <div className="airport-results">{visibleResults.map((result) => <button key={result.id} type="button" onClick={() => { onSelect(result); setQuery(airportCityLabel(result)); setResults([]) }}><strong>{result.name}</strong><small>{[result.admin1, result.country].filter(Boolean).join(', ')}</small></button>)}</div>}
     {error && <small className="airport-error">{en.airportSearchError}</small>}
     {!busy && query.trim().length >= 2 && results.length === 0 && !error && !location && <small className="airport-hint">{en.airportNoResults}</small>}
     {location && <small className="airport-zone">{location.timezone}</small>}
@@ -398,6 +460,10 @@ function App() {
     } catch { return null }
   })
   const [offlineReady, setOfflineReady] = useState(hasOfflineFlight)
+  const [routeWeather, setRouteWeather] = useState(readRouteWeather)
+  const [weatherRequest, setWeatherRequest] = useState<{ route: string; status: 'loading' | 'error' } | null>(null)
+  const [flightEditorOpen, setFlightEditorOpen] = useState(() => !activeFlight || !offlineReady)
+  const [offlineProgress, setOfflineProgress] = useState(0)
   const [offlineSaveStatus, setOfflineSaveStatus] = useState<'idle' | 'saving' | 'error'>('idle')
   const [online, setOnline] = useState(() => navigator.onLine)
   const [viewMode, setViewMode] = useState<'local' | 'flight'>(() => activeFlight && offlineReady ? 'flight' : 'local')
@@ -409,6 +475,10 @@ function App() {
   const [flightStatusOpen, setFlightStatusOpen] = useState(false)
   const [flightStatusRecord, setFlightStatusRecord] = useState<FlightApiRecord | null>(null)
   const [deviceCompassStatus, setDeviceCompassStatus] = useState<'idle' | 'requesting' | 'active' | 'denied' | 'unsupported' | 'no-sensor'>('idle')
+  const [usePhoneAltitude, setUsePhoneAltitude] = useState(false)
+  const [usePhoneHeading, setUsePhoneHeading] = useState(false)
+  const [phoneGps, setPhoneGps] = useState<{ altitude: number | null; heading: number | null; timestamp: number } | null>(null)
+  const [phoneGpsError, setPhoneGpsError] = useState('')
   const [deviceHeading, setDeviceHeading] = useState<number | null>(null)
   const [estimatedFlightTimezone, setEstimatedFlightTimezone] = useState<{ key: string; timezone: string } | null>(null)
 
@@ -421,6 +491,15 @@ function App() {
       window.removeEventListener('offline', updateOnline)
     }
   }, [])
+
+  useEffect(() => {
+    if (location.name !== en.myLocation) return
+    let cancelled = false
+    void nearbyCity(location.latitude, location.longitude).then((city) => {
+      if (!cancelled && city) setLocation((current) => ({ ...current, ...city }))
+    })
+    return () => { cancelled = true }
+  }, [location.name, location.latitude, location.longitude])
 
   useEffect(() => {
     localStorage.setItem('salah-location', JSON.stringify(location))
@@ -506,11 +585,17 @@ function App() {
 
   const flightMinute = Math.floor(now.getTime() / 60000)
   const routePlan = activeFlight ?? (viewMode === 'flight' && flightDraft.origin && flightDraft.destination ? flightDraft as FlightPlan : null)
-  const flightState = useMemo(() => {
+  const flightTiming = useMemo(() => {
     if (!routePlan) return null
     const departure = wallTimeToInstant(routePlan.actualDeparture || routePlan.scheduledDeparture, routePlan.origin.timezone)
     const arrival = wallTimeToInstant(routePlan.expectedArrival, routePlan.destination.timezone)
     if (!departure || !arrival || arrival <= departure) return null
+    return { departure, arrival }
+  }, [routePlan])
+
+  const flightState = useMemo(() => {
+    if (!routePlan || !flightTiming) return null
+    const { departure, arrival } = flightTiming
     const estimatedNow = new Date(flightMinute * 60000)
     const atOrigin = estimatedNow < departure || Boolean(routePlan.holdAtOrigin && !routePlan.actualDeparture)
     const atDestination = !atOrigin && estimatedNow >= arrival
@@ -529,7 +614,28 @@ function App() {
       distanceKm,
       speedKmh: atOrigin || atDestination ? 0 : distanceKm / durationHours,
     }
-  }, [routePlan, flightMinute])
+  }, [routePlan, flightTiming, flightMinute])
+
+  const waitingForActualDeparture = Boolean(routePlan?.holdAtOrigin && !routePlan.actualDeparture)
+  const routePrayers = useMemo(() => {
+    if (viewMode !== 'flight' || !routePlan || !flightTiming || waitingForActualDeparture) return null
+    return projectRoutePrayers(routePlan.origin, routePlan.destination, flightTiming.departure, flightTiming.arrival, preferences)
+  }, [viewMode, routePlan, flightTiming, waitingForActualDeparture, preferences])
+  const upcomingRoutePrayer = routePrayers?.crossings.find((crossing) => crossing.time > now)
+  const routePrayerLabel = upcomingRoutePrayer ? en[upcomingRoutePrayer.prayer] : ''
+
+  const watchingPhoneGps = viewMode === 'flight' && Boolean(flightState) && (usePhoneAltitude || usePhoneHeading)
+  useEffect(() => {
+    if (!watchingPhoneGps || !navigator.geolocation) return
+    const watch = navigator.geolocation.watchPosition(({ coords, timestamp }) => {
+      setPhoneGps({ altitude: coords.altitude, heading: coords.heading, timestamp })
+      setPhoneGpsError('')
+    }, (error) => {
+      setPhoneGps(null)
+      setPhoneGpsError(error.code === error.PERMISSION_DENIED ? en.phoneGpsDenied : en.phoneGpsUnavailable)
+    }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 })
+    return () => navigator.geolocation.clearWatch(watch)
+  }, [watchingPhoneGps])
 
   const flightTimezoneBucket = flightState && !flightState.atOrigin && !flightState.atDestination
     ? Math.floor(flightState.progress / 5)
@@ -599,14 +705,7 @@ function App() {
     }
   }, [todayTimes, todayDate, now, activeLocation, preferences])
 
-  const countdown = useMemo(() => {
-    if (!nextPrayer) return null
-    const seconds = Math.max(0, Math.floor((nextPrayer.time.getTime() - now.getTime()) / 1000))
-    const hours = Math.floor(seconds / 3600)
-    const minutes = Math.floor((seconds % 3600) / 60)
-    const remainingSeconds = seconds % 60
-    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
-  }, [nextPrayer, now])
+  const countdown = nextPrayer ? formatCountdown(nextPrayer.time, now) : null
 
   const qiblaBearing = useMemo(() => {
     return calculateQiblaBearing(activeLocation)
@@ -728,8 +827,11 @@ function App() {
     setLocating(true)
     navigator.geolocation.getCurrentPosition(async ({ coords }) => {
       try {
-        const timezone = await getTimezoneForCoordinates(coords.latitude, coords.longitude)
-        const nextLocation = { name: en.myLocation, latitude: coords.latitude, longitude: coords.longitude, timezone }
+        const [timezone, city] = await Promise.all([
+          getTimezoneForCoordinates(coords.latitude, coords.longitude),
+          nearbyCity(coords.latitude, coords.longitude),
+        ])
+        const nextLocation = { name: city?.name ?? en.myLocation, country: city?.country, latitude: coords.latitude, longitude: coords.longitude, timezone }
         setLocation(nextLocation)
         setSelectedDate(dateInTimezone(new Date(), timezone))
       } catch {
@@ -864,16 +966,38 @@ function App() {
 
   function applyFlightPlan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    activateFlightPlan()
+    if (offlineSaveStatus !== 'saving') activateFlightPlan()
+  }
+
+  async function saveRouteWeather(plan: FlightPlan, timing: { departure: Date; arrival: Date }) {
+    const route = weatherRouteId(plan.origin, plan.destination, timing.departure, timing.arrival)
+    setWeatherRequest({ route, status: 'loading' })
+    try {
+      setRouteWeather(await captureRouteWeather(plan.origin, plan.destination, timing.departure, timing.arrival))
+      setWeatherRequest(null)
+    } catch {
+      setWeatherRequest({ route, status: 'error' })
+    }
   }
 
   async function saveFlightOffline() {
     if (!activateFlightPlan()) return
     setOfflineSaveStatus('saving')
+    setOfflineProgress(10)
     try {
-      await cacheFlightApp()
+      await cacheFlightApp(setOfflineProgress)
+      const plan = flightDraft as FlightPlan
+      const departure = wallTimeToInstant(plan.actualDeparture || plan.scheduledDeparture, plan.origin.timezone)
+      const arrival = wallTimeToInstant(plan.expectedArrival, plan.destination.timezone)
+      if (departure && arrival && !(plan.holdAtOrigin && !plan.actualDeparture)) {
+        const route = weatherRouteId(plan.origin, plan.destination, departure, arrival)
+        if (routeWeather?.route !== route) await saveRouteWeather(plan, { departure, arrival })
+      }
+      localStorage.setItem('salah-flight-v2', JSON.stringify(flightDraft))
       localStorage.setItem(offlineFlightKey, 'ready')
+      setOfflineProgress(100)
       setOfflineReady(true)
+      setFlightEditorOpen(false)
       setOfflineSaveStatus('idle')
     } catch {
       setOfflineSaveStatus('error')
@@ -883,12 +1007,32 @@ function App() {
   function removeFlightPlan() {
     localStorage.removeItem(offlineFlightKey)
     setOfflineReady(false)
+    setFlightEditorOpen(true)
     setOfflineSaveStatus('idle')
     setActiveFlight(null)
     setViewMode('local')
     setSelectedDate(dateInTimezone(new Date(), location.timezone))
   }
 
+  const freshPhoneGps = phoneGps && now.getTime() - phoneGps.timestamp < 30000 ? phoneGps : null
+  const phoneAltitude = usePhoneAltitude && Number.isFinite(freshPhoneGps?.altitude) ? freshPhoneGps?.altitude ?? null : null
+  const phoneHeading = usePhoneHeading && Number.isFinite(freshPhoneGps?.heading) ? freshPhoneGps?.heading ?? null : null
+  const flightHeading = ((phoneHeading ?? flightState?.heading ?? 0) % 360 + 360) % 360
+  const headingDirectionIndex = Math.round(flightHeading / 45) % headingDirections.length
+  const gpsMessage = !navigator.geolocation ? en.phoneGpsUnsupported : phoneGpsError || en.phoneGpsWaiting
+
+  function togglePhoneReading(kind: 'altitude' | 'heading', enabled: boolean) {
+    if (!watchingPhoneGps) {
+      setPhoneGps(null)
+      setPhoneGpsError('')
+    }
+    if (kind === 'altitude') setUsePhoneAltitude(enabled)
+    else setUsePhoneHeading(enabled)
+  }
+
+  const currentWeatherRoute = routePlan && flightTiming && !waitingForActualDeparture ? weatherRouteId(routePlan.origin, routePlan.destination, flightTiming.departure, flightTiming.arrival) : null
+  const currentWeather = routeWeather?.route === currentWeatherRoute ? routeWeather : null
+  const showGroundCountdown = viewMode !== 'flight' || !flightState || flightState.atDestination
   const showingFlightEstimate = viewMode === 'flight' && Boolean(flightState)
   const canLookupFlight = import.meta.env.DEV || import.meta.env.MODE === 'flight-test'
   const canSaveOffline = import.meta.env.PROD && 'serviceWorker' in navigator && 'caches' in window
@@ -905,7 +1049,8 @@ function App() {
         </a>
         <div className="topbar-right">
           <span className="date-chip"><CalendarDays size={15} />{formatDate(now, activeLocation, { weekday: 'short', month: 'short', day: 'numeric' })}</span>
-          <span className="live-dot" aria-label={en.liveLocalTime} />
+
+          <span className={`connection-status ${online ? 'is-online' : 'is-offline'}`} role="status" title={online ? en.deviceOnline : en.deviceOffline}>{online ? <Wifi size={15} /> : <WifiOff size={15} />}{online ? en.online : en.offline}</span>
           <span className="live-label">{formatTime(now, activeLocation, preferences.timeFormat)}</span>
         </div>
       </header>
@@ -920,13 +1065,13 @@ function App() {
           <div className="location-control">
             <div className="location-label"><MapPin size={14} /> {en.yourLocation}</div>
             <div className="location-name">{viewMode === 'flight' && flightState ? locationDisplay(activeLocation) : locationDisplay(location)}</div>
-            <div className="location-zone">{displayFlightTimezone(activeLocation.timezone).replaceAll('_', ' ')}</div>
+            {viewMode === 'flight' && <div className="location-zone">{displayFlightTimezone(activeLocation.timezone).replaceAll('_', ' ')}</div>}
           </div>
         </section>
 
         <nav className="mode-switch" aria-label={en.modeSelection}>
-          <button type="button" className={viewMode === 'local' ? 'selected' : ''} onClick={() => selectViewMode('local')}><MapPinned size={16} />{en.localLocationMode}</button>
-          <button type="button" className={viewMode === 'flight' ? 'selected' : ''} onClick={() => selectViewMode('flight')}><Plane size={16} />{en.flightMode}</button>
+          <button type="button" aria-pressed={viewMode === 'local'} className={viewMode === 'local' ? 'selected' : ''} onClick={() => selectViewMode('local')}><MapPinned size={16} />{en.localLocationMode}</button>
+          <button type="button" aria-pressed={viewMode === 'flight'} className={viewMode === 'flight' ? 'selected' : ''} onClick={() => selectViewMode('flight')}><Plane size={16} />{en.flightMode}</button>
         </nav>
 
         {viewMode === 'local' && <section className="location-tools" aria-label={en.locationControls}>
@@ -974,9 +1119,9 @@ function App() {
 
         {viewMode === 'flight' && <>
           <section className={`flight-panel ${flightState ? 'flight-panel-active' : ''}`}>
-            <div className="flight-panel-heading"><span className="flight-summary-icon"><Plane size={17} /></span><span className="flight-summary-copy"><strong>{en.flightPlanning}</strong><small>{en.flightPlanningSubtitle}</small></span>{flightState && <span className="flight-active-badge"><span /> {en.flightRouteActive}</span>}</div>
+            <div className="flight-panel-heading"><span className="flight-summary-icon"><Plane size={17} /></span><span className="flight-summary-copy"><strong>{en.flightPlanning}</strong><small>{en.flightPlanningSubtitle}</small></span>{activeFlight && offlineReady && <button type="button" className="secondary-button flight-edit-button" aria-expanded={flightEditorOpen} aria-controls="flight-editor" onClick={() => setFlightEditorOpen((open) => !open)}>{flightEditorOpen ? en.closeFlightEditor : en.editFlight}</button>}</div>
             <div className="flight-content">
-              <p className="flight-data-note">{en.flightDataNote} <a href="https://aviationstack.com/signup/free" target="_blank" rel="noreferrer">{en.getFreeApiKey}</a></p>
+              <div id="flight-editor" hidden={!flightEditorOpen}><p className="flight-data-note">{en.flightDataNote} <a href="https://aviationstack.com/signup/free" target="_blank" rel="noreferrer">{en.getFreeApiKey}</a></p>
               <form className="flight-form" onSubmit={applyFlightPlan}>
                 <div className="flight-top-fields">
                   <label className="flight-number-field">{en.flightNumber}<input value={flightDraft.flightNumber} onChange={(event) => { setFlightDraft((current) => ({ ...current, flightNumber: event.target.value })); setFlightLookupError(''); setFlightLookupMessage('') }} placeholder={en.flightNumberPlaceholder} onKeyDown={(event) => { if (event.key === 'Enter' && canLookupFlight) { event.preventDefault(); if (online && !flightLookupBusy) void lookupFlight() } }} /><small className="flight-lookup-notice">{canLookupFlight ? en.flightLookupNotice : en.manualFlightNotice}</small>{canLookupFlight && <button className="flight-lookup-button" type="button" onClick={lookupFlight} disabled={!online || flightLookupBusy}>{flightLookupBusy ? <span className="search-spinner" /> : <Search size={14} />}{flightLookupBusy ? en.lookingUpFlight : en.lookupFlight}</button>}</label>
@@ -994,9 +1139,7 @@ function App() {
                       <input type="checkbox" checked={Boolean(flightDraft.actualDeparture)} onChange={(event) => setFlightDraft((current) => ({ ...current, actualDeparture: event.target.checked ? current.scheduledDeparture : '' }))} />
                       <span>{en.useActualDeparture}</span>
                     </label>
-                    {flightDraft.actualDeparture && <div className="date-time-pair">
-                      <FlightDateTimePicker label={`${en.actualDeparture} · ${en.originTime}`} timezone={flightTimeZone('actualDeparture', flightDraft)} value={displayedFlightTime('actualDeparture')} onChange={(value) => updateFlightTime('actualDeparture', value)} nudgable />
-                    </div>}
+                    {flightDraft.actualDeparture && <FlightDateTimePicker label={`${en.actualDeparture} · ${en.originTime}`} timezone={flightTimeZone('actualDeparture', flightDraft)} value={displayedFlightTime('actualDeparture')} onChange={(value) => updateFlightTime('actualDeparture', value)} nudgable />}
                     {!flightDraft.actualDeparture && <label className="actual-toggle">
                       <input type="checkbox" checked={Boolean(flightDraft.holdAtOrigin)} onChange={(event) => setFlightDraft((current) => ({ ...current, holdAtOrigin: event.target.checked }))} />
                       <span>{en.holdFlightAtOrigin}</span>
@@ -1007,31 +1150,66 @@ function App() {
                 </div>
                 {flightLookupError && <p className="flight-lookup-feedback flight-lookup-error" role="alert">{flightLookupError}</p>}
                 {flightLookupMessage && <p className="flight-lookup-feedback flight-lookup-success" role="status">{flightLookupMessage}{flightProviderStatus && <strong>{en.flightProviderStatus.replace('{status}', flightProviderStatus)}</strong>}</p>}
-                <div className="flight-form-actions"><button className="primary-button" type="submit"><Plane size={14} /> {en.saveFlightPlan}</button>{canSaveOffline && <button type="button" className="secondary-button" onClick={saveFlightOffline} disabled={!online || offlineSaveStatus === 'saving'}>{offlineSaveStatus === 'saving' ? en.savingFlightOffline : en.saveFlightOffline}</button>}{flightInvalid && <span className="flight-validation">{en.flightValidation}</span>}</div>
+                <div className="flight-form-actions"><button className="primary-button" type="submit" disabled={offlineSaveStatus === 'saving'}><Plane size={14} /> {en.saveFlightPlan}</button>{canSaveOffline && <button type="button" className="secondary-button" onClick={saveFlightOffline} disabled={!online || offlineSaveStatus === 'saving' || weatherRequest?.status === 'loading'}>{offlineSaveStatus === 'saving' ? en.savingFlightOffline : en.saveFlightOffline}</button>}{flightInvalid && <span className="flight-validation">{en.flightValidation}</span>}</div>
               </form>
+              </div>
               {offlineSaveStatus === 'error' && <p className="flight-lookup-feedback flight-lookup-error" role="alert">{en.offlineFlightError}</p>}
-              {offlineReady && activeFlight && <p className="flight-lookup-feedback flight-lookup-success" role="status">{online ? en.offlineFlightReady : en.offlineFlightInUse}</p>}
+              {(offlineSaveStatus === 'saving' || (offlineReady && activeFlight)) && <div className="offline-download">
+                <div role="status"><strong>{offlineSaveStatus === 'saving' ? en.savingFlightOffline : en.offlineDownloadComplete}</strong><span>{offlineSaveStatus === 'saving' ? offlineProgress : 100}%</span></div>
+                <progress aria-label={en.offlineDownloadProgress} max={100} value={offlineSaveStatus === 'saving' ? offlineProgress : 100} />
+                {offlineSaveStatus !== 'saving' && <p>{online ? en.offlineFlightReady : en.offlineFlightInUse}</p>}
+              </div>}
               {flightState && activeFlight && <div className="flight-route-status">
-                <div className="route-status-head"><strong>{activeFlight.flightNumber}</strong><span>{locationDisplay(activeFlight.origin)} <ChevronRight size={13} /> {locationDisplay(activeFlight.destination)}</span><button type="button" className="flight-clear" onClick={removeFlightPlan} disabled={offlineSaveStatus === 'saving'}>{en.removeFlight}</button></div>
+                <div className="route-status-head"><strong>{activeFlight.flightNumber}</strong><span>{airportCityLabel(activeFlight.origin)} <ChevronRight size={13} /> {airportCityLabel(activeFlight.destination)}</span><button type="button" className="flight-clear" onClick={removeFlightPlan} disabled={offlineSaveStatus === 'saving'}>{en.removeFlight}</button></div>
                 <div className="route-progress"><span style={{ width: `${flightState.progress}%` }} /></div>
                 <div className="route-status-foot"><span>{flightState.atOrigin ? en.flightAtOrigin : flightState.atDestination ? en.flightAtDestination : en.flightAlongRoute}</span><strong>{en.flightProgress.replace('{flight}', activeFlight.flightNumber).replace('{progress}', String(flightState.progress))}</strong></div>
               </div>}
             </div>
           </section>
+          {routePlan && flightState && <section className="panel route-prayer-card" aria-labelledby="route-prayer-heading">
+            <div><div className="route-prayer-heading"><h2 id="route-prayer-heading">{en.projectedNextSalah}</h2><span className="flight-active-badge">{!online && offlineReady && activeFlight ? en.offlineEstimated : en.estimated}</span></div><p>{en.projectedSalahDescription.replace('{method}', en.methodNames[preferences.method])}</p></div>
+            {upcomingRoutePrayer ? <>
+              <div className="route-prayer-countdown"><span>{en.estimated} {routePrayerLabel} {en.beginsIn}</span><strong>{formatCountdown(upcomingRoutePrayer.time, now)}</strong></div>
+              <div className="route-prayer-details">
+                <span>{formatDate(upcomingRoutePrayer.time, upcomingRoutePrayer.location, { month: 'short', day: 'numeric' })} · {formatTime(upcomingRoutePrayer.time, upcomingRoutePrayer.location, preferences.timeFormat)} ({displayFlightTimezone(upcomingRoutePrayer.location.timezone)})</span>
+                <span>{upcomingRoutePrayer.location.latitude.toFixed(3)}°, {upcomingRoutePrayer.location.longitude.toFixed(3)}°</span>
+              </div>
+            </> : <p>{waitingForActualDeparture ? en.projectedSalahWaiting : routePrayers?.incomplete ? en.projectedSalahUnavailable : en.noProjectedSalah}</p>}
+          </section>}
           {routePlan && flightState && <section className="flight-map-dashboard">
-            <FlightRouteMap origin={routePlan.origin} destination={routePlan.destination} position={activeLocation} heading={flightState.heading} flightNumber={routePlan.flightNumber} online={online} now={now} timeFormat={preferences.timeFormat} status={flightState.atOrigin ? en.aircraftAtOrigin : flightState.atDestination ? en.flightAtDestination : en.flightAlongRoute} />
+            <FlightRouteMap origin={routePlan.origin} destination={routePlan.destination} position={activeLocation} heading={flightHeading} flightNumber={routePlan.flightNumber} online={online} prayerPoint={upcomingRoutePrayer?.location} prayerLabel={routePrayerLabel} weather={currentWeather} departureTime={+flightState.departure} arrivalTime={+flightState.arrival} weatherStatus={weatherRequest?.route === currentWeatherRoute ? weatherRequest.status : undefined} onCaptureWeather={online && currentWeatherRoute && flightTiming && offlineSaveStatus !== 'saving' && weatherRequest?.status !== 'loading' ? () => void saveRouteWeather(routePlan, flightTiming) : undefined} airportAtPosition={flightState.atOrigin ? routePlan.origin : flightState.atDestination ? routePlan.destination : undefined} now={now} timeFormat={preferences.timeFormat} status={flightState.atOrigin ? en.aircraftAtOrigin : flightState.atDestination ? en.flightAtDestination : en.flightAlongRoute} />
             <div className="flight-metrics">
-              <article><span className="metric-icon"><MoveUpRight size={16} /></span><small>{en.heading}</small><strong>{Math.round(flightState.heading)}°</strong><span>{en.trueHeading}</span></article>
+              <article className="heading-metric">
+                <span className="metric-icon"><MoveUpRight size={18} /></span>
+                <small>{en.heading}</small>
+                <strong>{Math.round(flightHeading) % 360}° {headingDirections[headingDirectionIndex]}</strong>
+                <span>{phoneHeading === null ? en.estimatedHeading : en.phoneGps}</span>
+                <div className="heading-rose" aria-hidden="true">
+                  {headingDirections.map((direction, index) => <span key={direction} className={`direction-${direction.toLowerCase()}${index === headingDirectionIndex ? ' is-current' : ''}`}>{direction}</span>)}
+                  <div className="heading-needle" style={{ transform: `rotate(${flightHeading}deg)` }} />
+                </div>
+              </article>
+              {usePhoneAltitude && <article><span className="metric-icon"><Mountain size={18} /></span><small>{en.altitude}</small><strong>{phoneAltitude === null ? '—' : `${Math.round(phoneAltitude * 3.28084).toLocaleString()} ft`}</strong><span>{phoneAltitude === null ? en.notAvailable : en.phoneGps}</span></article>}
               <article><span className="metric-icon"><Gauge size={16} /></span><small>{en.estimatedSpeed}</small><strong>{Math.round(flightState.speedKmh)} <i>km/h</i></strong><span>{Math.round(flightState.speedKmh / 1.852)} {en.knots}</span></article>
-              <article><span className="metric-icon"><Route size={16} /></span><small>{en.routeProgress}</small><strong>{flightState.progress}%</strong><span>{Math.round(flightState.distanceKm).toLocaleString()} {en.kilometers}</span></article>
+              <article><span className="metric-icon"><Route size={16} /></span><small>{en.routeProgress}</small><strong>{flightState.progress}%</strong><span>{en.routeDistance.replace('{kilometers}', Math.round(flightState.distanceKm).toLocaleString()).replace('{miles}', Math.round(flightState.distanceKm / 1.609344).toLocaleString())}</span></article>
             </div>
+            <fieldset className="flight-sensors">
+              <legend>{en.phoneFlightSensors}</legend>
+              <button type="button" className="flight-sensor-switch" role="switch" aria-checked={usePhoneAltitude} onClick={() => togglePhoneReading('altitude', !usePhoneAltitude)}>
+                {en.usePhoneAltitude}<span className="flight-sensor-state" aria-hidden="true">{usePhoneAltitude ? en.switchOn : en.switchOff}</span>
+              </button>
+              <button type="button" className="flight-sensor-switch" role="switch" aria-checked={usePhoneHeading} onClick={() => togglePhoneReading('heading', !usePhoneHeading)}>
+                {en.usePhoneHeading}<span className="flight-sensor-state" aria-hidden="true">{usePhoneHeading ? en.switchOn : en.switchOff}</span>
+              </button>
+              {watchingPhoneGps && ((usePhoneAltitude && phoneAltitude === null) || (usePhoneHeading && phoneHeading === null)) && <p role="status">{gpsMessage}</p>}
+            </fieldset>
             {flightState.atOrigin && <p className="flight-not-started"><Clock3 size={14} /> {en.flightAtOrigin}</p>}
           </section>}
         </>}
 
-        <section className="hero-grid">
-          <article className="next-card">
-            <div className="next-card-top"><span className="next-badge"><span /> {(showingFlightEstimate ? en.estimatedNextPrayer : en.nextPrayer).toUpperCase()}</span><Clock3 size={18} className="next-clock-icon" /></div>
+        <section className={showGroundCountdown ? "hero-grid" : "hero-grid date-only"}>
+          {showGroundCountdown && <article className="next-card">
+            <div className="next-card-top"><span className="next-badge"><span /> {en.nextPrayer.toUpperCase()}</span><Clock3 size={18} className="next-clock-icon" /></div>
             {nextPrayer && countdown ? <>
               <p className="next-intro">{nextPrayer.label} {en.beginsIn}</p>
               <div className="countdown" aria-live="off">{countdown.split(':').map((part, index) => <span className="countdown-part" key={`${part}-${index}`}><strong>{part}</strong>{index < 2 && <i>:</i>}</span>)}</div>
@@ -1039,7 +1217,7 @@ function App() {
             </> : <div className="no-times-inline">{en.invalidTimes}</div>}
             <div className="card-orbit orbit-one" /><div className="card-orbit orbit-two" />
             <div className="hero-prayer-mark"><span className="mark-sun" /><span className="mark-horizon" /></div>
-          </article>
+          </article>}
 
           <article className="date-card">
             <div className="section-kicker"><CalendarDays size={16} /> {en.date.toUpperCase()}</div>
@@ -1121,7 +1299,7 @@ function App() {
         <section className="flight-status-dialog" role="dialog" aria-modal="true" aria-labelledby="flight-status-title">
           <div className="status-dialog-heading"><span className="flight-summary-icon"><Plane size={18} /></span><div><p className="eyebrow">{en.flightStatusWindowEyebrow}</p><h2 id="flight-status-title">{en.flightStatusWindowTitle}</h2></div><button className="icon-button status-close" type="button" aria-label={en.closeWindow} onClick={() => setFlightStatusOpen(false)}><X size={17} /></button></div>
           {flightLookupBusy ? <div className="status-loading"><span className="search-spinner" />{en.flightStatusLoading.replace('{flight}', flightDraft.flightNumber)}</div> : flightLookupError ? <div className="status-dialog-error"><Compass size={20} /><p>{flightLookupError}</p></div> : flightStatusRecord ? <>
-            <div className="status-flight-route"><strong>{flightStatusRecord.flight?.iata ?? flightDraft.flightNumber}</strong><span>{locationDisplay(flightDraft.origin ?? defaultLocation)} <ChevronRight size={14} /> {locationDisplay(flightDraft.destination ?? defaultLocation)}</span><b>{flightProviderStatus || flightStatusRecord.flight_status || en.statusUnavailable}</b></div>
+            <div className="status-flight-route"><strong>{flightStatusRecord.flight?.iata ?? flightDraft.flightNumber}</strong><span>{airportCityLabel(flightDraft.origin ?? defaultLocation)} <ChevronRight size={14} /> {airportCityLabel(flightDraft.destination ?? defaultLocation)}</span><b>{flightProviderStatus || flightStatusRecord.flight_status || en.statusUnavailable}</b></div>
             <div className="status-time-grid"><div><small>{en.scheduledDeparture} · {en.originTime}</small><strong>{displayedFlightTime('scheduledDeparture').replace('T', ' ')}</strong><span>{flightDraft.origin?.timezone ?? '—'}</span></div><div><small>{en.actualDeparture} · {en.originTime}</small><strong>{flightDraft.actualDeparture ? displayedFlightTime('actualDeparture').replace('T', ' ') : en.notAvailable}</strong><span>{flightDraft.origin?.timezone ?? '—'}</span></div><div><small>{en.expectedArrival} · {en.destinationTime}</small><strong>{displayedFlightTime('expectedArrival').replace('T', ' ')}</strong><span>{flightDraft.destination?.timezone ?? '—'}</span></div></div>
             <p className="status-utc-note"><Clock3 size={14} />{en.utcTimesConverted}</p>
             <button type="button" className="primary-button status-use-button" onClick={() => { if (activateFlightPlan()) setFlightStatusOpen(false) }}><Plane size={14} />{en.useFlightPlan}</button>

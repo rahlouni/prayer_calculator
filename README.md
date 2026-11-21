@@ -24,3 +24,13 @@ Geolocation, city search, map tiles, flight lookup, and automatic time-zone reso
 The planner uses Aviationstack's free personal-use plan (100 requests/month; non-commercial use). Create a free Aviationstack account and API key, copy `.env.example` to `.env.local`, and set `AVIATIONSTACK_ACCESS_KEY` in `.env.local`. Restart `npm run dev`, open **Plan a flight**, enter a flight number and its scheduled departure date, then select **Look up flight**. A matching result fills airport locations, scheduled/actual departure, and estimated/actual arrival; review the data and select **Use this flight plan** to calculate.
 
 The Vite development server proxies the lookup so the API key is not sent to browser code. Aviationstack provides an airport IANA time zone for each event; the planner shows departure and actual departure in the origin airport's local time and arrival in the destination airport's local time. Verify those values in the in-app status dialog. Route position, heading, and speed on the map are estimates based on the entered times and device clock—not live telemetry. This proxy is for local testing only; deploy a protected server-side proxy before production. API availability and free-plan coverage/limits are controlled by Aviationstack. Airport coordinates are resolved by IATA code through Open-Meteo Geocoding.
+
+## Aviation advisories
+
+The local development server and production preview proxy the NOAA Aviation Weather Center’s worldwide SIGMET feed. The request fetches the public feed without transmitting the selected flight or route.
+
+For GitHub Pages, deploy the Cloudflare Worker defined in `wrangler.toml` and set the repository Actions variable `VITE_AVIATION_WEATHER_URL` to the worker’s HTTPS `/api/aviation-advisories` URL. The browser displays saved snapshots offline and filters advisories by their published validity period.
+
+## Place names
+
+Flight airport city labels use the public-domain [OurAirports dataset](https://ourairports.com/data/). Device location labels are matched locally against names, coordinates, and country codes extracted from [GeoNames cities5000](https://www.geonames.org/export/) ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)).

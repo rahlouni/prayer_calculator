@@ -23,6 +23,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build -- --base=/prayer_calculator/
+        env:
+          VITE_AVIATION_WEATHER_URL: ${{ vars.VITE_AVIATION_WEATHER_URL }}
       - uses: actions/upload-pages-artifact@v4
         with:
           path: dist
