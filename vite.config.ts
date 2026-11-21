@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig, loadEnv, type Plugin } from 'vite'
@@ -62,9 +64,27 @@ function flightStatusProxy(apiKey: string): Plugin {
   }
 }
 
+function offlineFlightWorker(): Plugin {
+  return {
+    name: 'offline-flight-worker',
+    apply: 'build',
+    generateBundle(_options, bundle) {
+      const assets = Object.keys(bundle).sort()
+      const worker = readFileSync(new URL('./offline-worker.js', import.meta.url), 'utf8')
+      const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
+      const version = createHash('sha256').update(JSON.stringify(assets)).update(html).update(worker).digest('hex').slice(0, 16)
+      this.emitFile({
+        type: 'asset',
+        fileName: 'offline-worker.js',
+        source: `const BUILD_VERSION = ${JSON.stringify(version)}\nconst BUILD_ASSETS = ${JSON.stringify(assets)}\n${worker}`,
+      })
+    },
+  }
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   return {
-    plugins: [react(), tailwindcss(), flightStatusProxy(env.AVIATIONSTACK_ACCESS_KEY ?? '')],
+    plugins: [react(), tailwindcss(), flightStatusProxy(env.AVIATIONSTACK_ACCESS_KEY ?? ''), offlineFlightWorker()],
   }
 })

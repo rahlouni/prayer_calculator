@@ -40,6 +40,7 @@ import {
   type MethodKey,
   type Preferences,
 } from './lib/prayer'
+import { approximateFlightTimezone, cacheFlightApp, displayFlightTimezone, hasOfflineFlight, offlineFlightKey } from './lib/offline'
 import './App.css'
 
 type CityResult = Location & { id: number; admin1?: string }
@@ -277,7 +278,7 @@ function RouteMapBounds({ origin, destination }: { origin: Location; destination
   return null
 }
 
-function FlightRouteMap({ origin, destination, position, heading, flightNumber, now, timeFormat, status }: { origin: Location; destination: Location; position: Location; heading: number; flightNumber: string; now: Date; timeFormat: Preferences['timeFormat']; status: string }) {
+function FlightRouteMap({ origin, destination, position, heading, flightNumber, now, timeFormat, status, online }: { origin: Location; destination: Location; position: Location; heading: number; flightNumber: string; now: Date; timeFormat: Preferences['timeFormat']; status: string; online: boolean }) {
   const aircraftIcon = useMemo(() => divIcon({
     className: 'aircraft-marker-wrap',
     html: `<span class="aircraft-marker" style="transform:rotate(${heading}deg)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.5 15 10l6 4v2l-6-2v6l2 2v1l-5-1.5L7 23v-1l2-2v-6l-6 2v-2l6-4 3-8.5Z"/></svg></span>`,
@@ -288,7 +289,7 @@ function FlightRouteMap({ origin, destination, position, heading, flightNumber, 
   return <div className="flight-map-wrap">
     <div className="flight-map-title"><span><MapPinned size={16} /> {en.routeMap}</span><small>{en.estimatedRouteOnly}</small></div>
     <MapContainer key={`${flightNumber}-${origin.latitude}-${destination.latitude}`} center={[position.latitude, position.longitude]} zoom={4} scrollWheelZoom className="flight-route-map">
-      <TileLayer attribution={en.mapAttribution} url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />
+      {online && <TileLayer attribution={en.mapAttribution} url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />}
       <RouteMapBounds origin={origin} destination={destination} />
       <Polyline positions={path} pathOptions={{ color: '#548267', weight: 3, opacity: 0.8, dashArray: '7 7' }} />
       <CircleMarker center={[origin.latitude, origin.longitude]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: '#527b67', fillOpacity: 1 }} />
@@ -298,7 +299,7 @@ function FlightRouteMap({ origin, destination, position, heading, flightNumber, 
           <strong>{flightNumber}</strong><br />
           {status}<br />
           {en.estimatedAircraftTime} {formatTime(now, position, timeFormat)}<br />
-          {formatDate(now, position, { month: 'short', day: 'numeric', year: 'numeric' })} · {position.timezone}
+          {formatDate(now, position, { month: 'short', day: 'numeric', year: 'numeric' })} · {displayFlightTimezone(position.timezone)}
         </Tooltip>
       </Marker>
     </MapContainer>
@@ -396,7 +397,10 @@ function App() {
       return saved ? JSON.parse(saved) as FlightPlan : null
     } catch { return null }
   })
-  const [viewMode, setViewMode] = useState<'local' | 'flight'>('local')
+  const [offlineReady, setOfflineReady] = useState(hasOfflineFlight)
+  const [offlineSaveStatus, setOfflineSaveStatus] = useState<'idle' | 'saving' | 'error'>('idle')
+  const [online, setOnline] = useState(() => navigator.onLine)
+  const [viewMode, setViewMode] = useState<'local' | 'flight'>(() => activeFlight && offlineReady ? 'flight' : 'local')
   const [flightInvalid, setFlightInvalid] = useState(false)
   const [flightLookupBusy, setFlightLookupBusy] = useState(false)
   const [flightLookupError, setFlightLookupError] = useState('')
@@ -407,6 +411,16 @@ function App() {
   const [deviceCompassStatus, setDeviceCompassStatus] = useState<'idle' | 'requesting' | 'active' | 'denied' | 'unsupported' | 'no-sensor'>('idle')
   const [deviceHeading, setDeviceHeading] = useState<number | null>(null)
   const [estimatedFlightTimezone, setEstimatedFlightTimezone] = useState<{ key: string; timezone: string } | null>(null)
+
+  useEffect(() => {
+    const updateOnline = () => setOnline(navigator.onLine)
+    window.addEventListener('online', updateOnline)
+    window.addEventListener('offline', updateOnline)
+    return () => {
+      window.removeEventListener('online', updateOnline)
+      window.removeEventListener('offline', updateOnline)
+    }
+  }, [])
 
   useEffect(() => {
     localStorage.setItem('salah-location', JSON.stringify(location))
@@ -502,7 +516,7 @@ function App() {
     const atDestination = !atOrigin && estimatedNow >= arrival
     const progress = atOrigin ? 0 : Math.min(1, (estimatedNow.getTime() - departure.getTime()) / (arrival.getTime() - departure.getTime()))
     const point = atOrigin ? routePlan.origin : atDestination ? routePlan.destination : positionAlongRoute(routePlan.origin, routePlan.destination, progress)
-    const timezone = atDestination ? routePlan.destination.timezone : routePlan.origin.timezone
+    const timezone = atDestination ? routePlan.destination.timezone : atOrigin ? routePlan.origin.timezone : approximateFlightTimezone(point.longitude)
     const label = `${routePlan.flightNumber} · ${Math.round(progress * 100)}%`
     const distanceKm = routeDistanceKm(routePlan.origin, routePlan.destination)
     const durationHours = (arrival.getTime() - departure.getTime()) / 3_600_000
@@ -529,32 +543,24 @@ function App() {
 
   const flightTimezoneLatitude = flightTimezoneLookupPoint?.latitude
   const flightTimezoneLongitude = flightTimezoneLookupPoint?.longitude
-  const originTimezone = routePlan?.origin.timezone
-
   useEffect(() => {
-    if (viewMode !== 'flight' || !flightTimezoneKey || flightTimezoneLatitude === undefined || flightTimezoneLongitude === undefined || !originTimezone) return
+    if (!online || viewMode !== 'flight' || !flightTimezoneKey || flightTimezoneLatitude === undefined || flightTimezoneLongitude === undefined) return
     let cancelled = false
     getTimezoneForCoordinates(flightTimezoneLatitude, flightTimezoneLongitude)
       .then((timezone) => {
         if (!cancelled) setEstimatedFlightTimezone({ key: flightTimezoneKey, timezone })
       })
-      .catch(() => {
-        if (!cancelled) setEstimatedFlightTimezone({ key: flightTimezoneKey, timezone: originTimezone })
-      })
+      .catch(() => { /* The route longitude provides an offline time zone estimate. */ })
     return () => { cancelled = true }
-  }, [viewMode, flightTimezoneKey, flightTimezoneLatitude, flightTimezoneLongitude, originTimezone])
+  }, [online, viewMode, flightTimezoneKey, flightTimezoneLatitude, flightTimezoneLongitude])
 
   const activeLocation = useMemo(() => {
     if (viewMode !== 'flight' || !flightState || !routePlan) return location
-    const timezone = flightState.atDestination
-      ? routePlan.destination.timezone
-      : flightState.atOrigin
-        ? routePlan.origin.timezone
-        : estimatedFlightTimezone?.key === flightTimezoneKey
-          ? estimatedFlightTimezone.timezone
-          : routePlan.origin.timezone
+    const timezone = online && estimatedFlightTimezone?.key === flightTimezoneKey
+      ? estimatedFlightTimezone.timezone
+      : flightState.location.timezone
     return { ...flightState.location, timezone }
-  }, [viewMode, flightState, routePlan, location, estimatedFlightTimezone, flightTimezoneKey])
+  }, [viewMode, flightState, routePlan, location, online, estimatedFlightTimezone, flightTimezoneKey])
 
   const selectedKey = dateKey(selectedDate)
   const todayKey = dateKey(dateInTimezone(now, activeLocation.timezone))
@@ -861,12 +867,30 @@ function App() {
     activateFlightPlan()
   }
 
+  async function saveFlightOffline() {
+    if (!activateFlightPlan()) return
+    setOfflineSaveStatus('saving')
+    try {
+      await cacheFlightApp()
+      localStorage.setItem(offlineFlightKey, 'ready')
+      setOfflineReady(true)
+      setOfflineSaveStatus('idle')
+    } catch {
+      setOfflineSaveStatus('error')
+    }
+  }
+
   function removeFlightPlan() {
+    localStorage.removeItem(offlineFlightKey)
+    setOfflineReady(false)
+    setOfflineSaveStatus('idle')
     setActiveFlight(null)
     setViewMode('local')
     setSelectedDate(dateInTimezone(new Date(), location.timezone))
   }
 
+  const showingFlightEstimate = viewMode === 'flight' && Boolean(flightState)
+  const canSaveOffline = import.meta.env.PROD && 'serviceWorker' in navigator && 'caches' in window
   const isViewingToday = selectedKey === todayKey
   const mapLatitude = manualLat.trim() && Number.isFinite(Number(manualLat)) ? Number(manualLat) : defaultLocation.latitude
   const mapLongitude = manualLon.trim() && Number.isFinite(Number(manualLon)) ? Number(manualLon) : defaultLocation.longitude
@@ -895,7 +919,7 @@ function App() {
           <div className="location-control">
             <div className="location-label"><MapPin size={14} /> {en.yourLocation}</div>
             <div className="location-name">{viewMode === 'flight' && flightState ? locationDisplay(activeLocation) : locationDisplay(location)}</div>
-            <div className="location-zone">{activeLocation.timezone.replaceAll('_', ' ')}</div>
+            <div className="location-zone">{displayFlightTimezone(activeLocation.timezone).replaceAll('_', ' ')}</div>
           </div>
         </section>
 
@@ -982,17 +1006,19 @@ function App() {
                 </div>
                 {flightLookupError && <p className="flight-lookup-feedback flight-lookup-error" role="alert">{flightLookupError}</p>}
                 {flightLookupMessage && <p className="flight-lookup-feedback flight-lookup-success" role="status">{flightLookupMessage}{flightProviderStatus && <strong>{en.flightProviderStatus.replace('{status}', flightProviderStatus)}</strong>}</p>}
-                <div className="flight-form-actions"><button className="primary-button" type="submit"><Plane size={14} /> {en.saveFlightPlan}</button>{flightInvalid && <span className="flight-validation">{en.flightValidation}</span>}</div>
+                <div className="flight-form-actions"><button className="primary-button" type="submit"><Plane size={14} /> {en.saveFlightPlan}</button>{canSaveOffline && <button type="button" className="secondary-button" onClick={saveFlightOffline} disabled={!online || offlineSaveStatus === 'saving'}>{offlineSaveStatus === 'saving' ? en.savingFlightOffline : en.saveFlightOffline}</button>}{flightInvalid && <span className="flight-validation">{en.flightValidation}</span>}</div>
               </form>
+              {offlineSaveStatus === 'error' && <p className="flight-lookup-feedback flight-lookup-error" role="alert">{en.offlineFlightError}</p>}
+              {offlineReady && activeFlight && <p className="flight-lookup-feedback flight-lookup-success" role="status">{online ? en.offlineFlightReady : en.offlineFlightInUse}</p>}
               {flightState && activeFlight && <div className="flight-route-status">
-                <div className="route-status-head"><strong>{activeFlight.flightNumber}</strong><span>{locationDisplay(activeFlight.origin)} <ChevronRight size={13} /> {locationDisplay(activeFlight.destination)}</span><button type="button" className="flight-clear" onClick={removeFlightPlan}>{en.removeFlight}</button></div>
+                <div className="route-status-head"><strong>{activeFlight.flightNumber}</strong><span>{locationDisplay(activeFlight.origin)} <ChevronRight size={13} /> {locationDisplay(activeFlight.destination)}</span><button type="button" className="flight-clear" onClick={removeFlightPlan} disabled={offlineSaveStatus === 'saving'}>{en.removeFlight}</button></div>
                 <div className="route-progress"><span style={{ width: `${flightState.progress}%` }} /></div>
                 <div className="route-status-foot"><span>{flightState.atOrigin ? en.flightAtOrigin : flightState.atDestination ? en.flightAtDestination : en.flightAlongRoute}</span><strong>{en.flightProgress.replace('{flight}', activeFlight.flightNumber).replace('{progress}', String(flightState.progress))}</strong></div>
               </div>}
             </div>
           </section>
           {routePlan && flightState && <section className="flight-map-dashboard">
-            <FlightRouteMap origin={routePlan.origin} destination={routePlan.destination} position={activeLocation} heading={flightState.heading} flightNumber={routePlan.flightNumber} now={now} timeFormat={preferences.timeFormat} status={flightState.atOrigin ? en.aircraftAtOrigin : flightState.atDestination ? en.flightAtDestination : en.flightAlongRoute} />
+            <FlightRouteMap origin={routePlan.origin} destination={routePlan.destination} position={activeLocation} heading={flightState.heading} flightNumber={routePlan.flightNumber} online={online} now={now} timeFormat={preferences.timeFormat} status={flightState.atOrigin ? en.aircraftAtOrigin : flightState.atDestination ? en.flightAtDestination : en.flightAlongRoute} />
             <div className="flight-metrics">
               <article><span className="metric-icon"><MoveUpRight size={16} /></span><small>{en.heading}</small><strong>{Math.round(flightState.heading)}°</strong><span>{en.trueHeading}</span></article>
               <article><span className="metric-icon"><Gauge size={16} /></span><small>{en.estimatedSpeed}</small><strong>{Math.round(flightState.speedKmh)} <i>km/h</i></strong><span>{Math.round(flightState.speedKmh / 1.852)} {en.knots}</span></article>
@@ -1004,7 +1030,7 @@ function App() {
 
         <section className="hero-grid">
           <article className="next-card">
-            <div className="next-card-top"><span className="next-badge"><span /> {en.nextPrayer.toUpperCase()}</span><Clock3 size={18} className="next-clock-icon" /></div>
+            <div className="next-card-top"><span className="next-badge"><span /> {(showingFlightEstimate ? en.estimatedNextPrayer : en.nextPrayer).toUpperCase()}</span><Clock3 size={18} className="next-clock-icon" /></div>
             {nextPrayer && countdown ? <>
               <p className="next-intro">{nextPrayer.label} {en.beginsIn}</p>
               <div className="countdown" aria-live="off">{countdown.split(':').map((part, index) => <span className="countdown-part" key={`${part}-${index}`}><strong>{part}</strong>{index < 2 && <i>:</i>}</span>)}</div>
@@ -1033,7 +1059,7 @@ function App() {
         <section className="content-grid">
           <article className="panel prayer-panel">
             <div className="panel-heading">
-              <div><p className="eyebrow">{formatScheduleDate(selectedDate, activeLocation, { weekday: 'long' }).toUpperCase()} · {formatScheduleDate(selectedDate, activeLocation, { month: 'short', day: 'numeric' }).toUpperCase()}</p><h2>{en.prayerTimes}</h2></div>
+              <div><p className="eyebrow">{formatScheduleDate(selectedDate, activeLocation, { weekday: 'long' }).toUpperCase()} · {formatScheduleDate(selectedDate, activeLocation, { month: 'short', day: 'numeric' }).toUpperCase()}</p><h2>{showingFlightEstimate ? en.estimatedPrayerTimes : en.prayerTimes}</h2></div>
               <span className="timezone-tag"><Clock3 size={13} /> {en.localTime}</span>
             </div>
             {displayedTimes ? <div className="prayer-list">
