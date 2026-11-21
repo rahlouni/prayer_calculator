@@ -305,7 +305,7 @@ function FlightRouteMap({ origin, destination, position, heading, flightNumber, 
   return <div className="flight-map-wrap">
     <div className="flight-map-title"><span><MapPinned size={16} /> {en.routeMap}</span><small>{en.estimatedRouteOnly}</small></div>
     <MapContainer key={`${flightNumber}-${origin.latitude}-${destination.latitude}`} center={[position.latitude, position.longitude]} zoom={4} scrollWheelZoom className="flight-route-map">
-      {online && <TileLayer className="flight-dark-basemap" attribution={en.mapAttribution} url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />}
+      {online && <TileLayer className="flight-dark-basemap" opacity={0.72} attribution={en.mapAttribution} url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />}
       <DayNightLayer minute={Math.floor(now.getTime() / 60_000)} />
       <RouteMapBounds origin={origin} destination={destination} />
       {showAdvisories && advisoryData.features.length > 0 && <AviationAdvisoryLayer key={String(advisorySnapshot?.fetchedAt) + advisoryKey} data={advisoryData} />}
